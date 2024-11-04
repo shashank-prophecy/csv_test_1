@@ -8,6 +8,7 @@ from prophecy.cb.ui.uispec import *
 from prophecy.cb.util.NumberUtils import parseFloat
 from prophecy.cb.server.base import WorkflowContext
 import dataclasses
+from prophecy.cb.migration import PropertyMigrationObj
 
 
 class csv(DatasetSpec):
@@ -63,10 +64,115 @@ class csv(DatasetSpec):
         modifiedAfter: Optional[str] = None
         recursiveFileLookup: Optional[bool] = None
         createSingleOutputFile: Optional[bool] = None
+        pathSelection: Optional[str] = "fileLocation"
+        targetPathSelection: Optional[str] = "fileLocation"
+        optionalCopyDestination: Optional[str] = None
+        secretUsername: SecretValue = field(default_factory=list)
+        secretPassword: SecretValue = field(default_factory=list)
+        secretUrl: SecretValue = field(default_factory=list)
+        sftpOptionalCopyDestination: Optional[str] = None
+        sftpSecretUsername: SecretValue = field(default_factory=list)
+        sftpSecretPassword: SecretValue = field(default_factory=list)
+        sftpSecretUrl: SecretValue = field(default_factory=list)
+        sftpSourcePath: Optional[str] = None
 
     def sourceDialog(self) -> DatasetDialog:
+        sharepointDialog = (StackLayout(direction=("vertical"), gap=("1rem"))
+                            .addElement(
+            AlertBox(
+                variant="info",
+                _children=[
+                    Markdown(
+                        "Double check the [Office365-REST-Python-Client](https://pypi.org/project/Office365-REST-Python-Client/) (Python Package) PyPi dependency is configured for this pipeline and is installed on the Spark cluster\n"
+                    )
+                ]
+            )
+        )
+                            .addElement(
+            StackLayout()
+                .addElement(
+                ColumnsLayout(gap="1rem")
+                    .addColumn(SecretBox("Username").bindPlaceholder("username").bindProperty("secretUsername"))
+                    .addColumn(
+                    SecretBox("Password").isPassword().bindPlaceholder("password").bindProperty("secretPassword"))
+            )
+        )
+                            .addElement(TitleElement(title="URL"))
+                            .addElement(
+            SecretBox("Sharepoint Relative URL")
+                .bindPlaceholder("https://xxx.sharepoint.com/personal/xxx0_onmicrosoft_com")
+                .bindProperty("secretUrl")
+        )
+                            .addElement(TextBox("Sharepoint Location")
+                                        .bindPlaceholder("/personal/xxx/Documents/customers.csv")
+                                        .bindProperty("path")
+                                        )
+                            .addElement(TextBox("Destination (Data will be copied here from sharepoint)")
+                                        .bindPlaceholder("dbfs:/sharepoint/customers.csv")
+                                        .bindProperty("optionalCopyDestination")
+                                        )
+                            )
+
+        sftpDialog = (StackLayout(direction=("vertical"), gap=("1rem"))
+                      .addElement(
+            AlertBox(
+                variant="info",
+                _children=[
+                    Markdown(
+                        "Double check the [paramiko](https://pypi.org/project/paramiko/) (Python Package) PyPi dependency is configured for this pipeline and is installed on the Spark cluster\n"
+                    )
+                ]
+            )
+        )
+                      .addElement(
+            StackLayout()
+                .addElement(
+                ColumnsLayout(gap="1rem")
+                    .addColumn(SecretBox("Username").bindPlaceholder("username").bindProperty("sftpSecretUsername"))
+                    .addColumn(
+                    SecretBox("Password").isPassword().bindPlaceholder("password").bindProperty("sftpSecretPassword"))
+            )
+        )
+                      .addElement(TitleElement(title="Source SFTP Details"))
+                      .addElement(
+            SecretBox("Host")
+                .bindPlaceholder("104.197.67.53")
+                .bindProperty("sftpSecretUrl")
+        )
+                      .addElement(TextBox("Source File Path On SFTP")
+                                  .bindPlaceholder("/home/sftpuser/customers.csv")
+                                  .bindProperty("sftpSourcePath")
+                                  )
+                      .addElement(TextBox("Destination (Data will be copied here from sftp)")
+                                  .bindPlaceholder("dbfs:/sftp/customers.csv")
+                                  .bindProperty("sftpOptionalCopyDestination")
+                                  )
+                      )
+
+        locationSelection = (RadioGroup("Read from:")
+                             .addOption("File Location", "fileLocation")
+                             .addOption("Sharepoint", "sharepoint")
+                             .addOption("SFTP", "sftp")
+                             .bindProperty("pathSelection"))
+
         return DatasetDialog("csv") \
-            .addSection("LOCATION", TargetLocation("path")) \
+            .addSection("LOCATION", StackLayout().addElement(locationSelection)
+                        .addElement(
+            Condition()
+                .ifEqual(PropExpr("component.properties.pathSelection"), StringExpr("fileLocation"))
+                .then(TargetLocation("path"))
+        )
+                        .addElement(
+            Condition()
+                .ifEqual(PropExpr("component.properties.pathSelection"), StringExpr("sharepoint"))
+                .then(sharepointDialog)
+        )
+                        .addElement(
+            Condition()
+                .ifEqual(PropExpr("component.properties.pathSelection"), StringExpr("sftp"))
+                .then(sftpDialog)
+        )
+                        ) \
             .addSection(
             "PROPERTIES",
             ColumnsLayout(gap="1rem", height="100%")
@@ -155,8 +261,20 @@ class csv(DatasetSpec):
         )
 
     def targetDialog(self) -> DatasetDialog:
+        locationSelection = (RadioGroup("Write to:")
+                             .addOption("File Location", "fileLocation")
+                             .addOption("Sharepoint (Coming Soon)", "sharepoint")
+                             .addOption("SFTP (Coming Soon)", "sftp")
+                             .bindProperty("targetPathSelection"))
+
         return DatasetDialog("csv") \
-            .addSection("LOCATION", TargetLocation("path")) \
+            .addSection("LOCATION", StackLayout().addElement(locationSelection)
+                        .addElement(
+            Condition()
+                .ifEqual(PropExpr("component.properties.targetPathSelection"), StringExpr("fileLocation"))
+                .then(TargetLocation("path"))
+        )
+                        ) \
             .addSection(
             "PROPERTIES",
             ColumnsLayout(gap="1rem", height="100%")
@@ -234,9 +352,48 @@ class csv(DatasetSpec):
                 diagnostics.append(
                     Diagnostic("properties.separator", message, SeverityLevelEnum.Error))
 
-        if len(component.properties.path) == 0:
+        if component.properties.targetPathSelection in ["sharepoint", "sftp"]:
+            diagnostics.append(
+                Diagnostic("properties.targetPathSelection",
+                           f"Write to {component.properties.targetPathSelection} coming soon !!",
+                           SeverityLevelEnum.Error))
+
+        if component.properties.targetPathSelection not in ["sharepoint", "sftp"] and (
+                component.properties.pathSelection == "sharepoint" or component.properties.pathSelection == "fileLocation") and len(
+                component.properties.path) == 0:
             diagnostics.append(
                 Diagnostic("properties.path", "path variable cannot be empty [Location]", SeverityLevelEnum.Error))
+
+        if component.properties.pathSelection == "sharepoint":
+            if not component.properties.secretUsername.parts:
+                diagnostics.append(Diagnostic("properties.secretUsername", "Username cannot be empty [Location]",
+                                              SeverityLevelEnum.Error))
+            if not component.properties.secretPassword.parts:
+                diagnostics.append(Diagnostic("properties.secretPassword", "Password cannot be empty [Location]",
+                                              SeverityLevelEnum.Error))
+
+            if not component.properties.secretUrl.parts:
+                diagnostics.append(
+                    Diagnostic("properties.secretUrl", f"Sharepoint URL cannot be empty [Location]",
+                               SeverityLevelEnum.Error))
+
+        if component.properties.pathSelection == "sftp":
+            if not component.properties.sftpSecretUsername.parts:
+                diagnostics.append(Diagnostic("properties.sftpSecretUsername", "Username cannot be empty [Location]",
+                                              SeverityLevelEnum.Error))
+            if not component.properties.sftpSecretPassword.parts:
+                diagnostics.append(Diagnostic("properties.sftpSecretPassword", "Password cannot be empty [Location]",
+                                              SeverityLevelEnum.Error))
+
+            if not component.properties.sftpSecretUrl.parts:
+                diagnostics.append(
+                    Diagnostic("properties.sftpSecretUrl", f"Host cannot be empty [Location]",
+                               SeverityLevelEnum.Error))
+
+            if not component.properties.sftpSourcePath:
+                diagnostics.append(
+                    Diagnostic("properties.sftpSourcePath", f"Source path cannot be empty [Location]",
+                               SeverityLevelEnum.Error))
 
         if component.properties.samplingRatio is not None:
             if component.properties.samplingRatio.diagnosticMessages is not None:
@@ -301,6 +458,59 @@ class csv(DatasetSpec):
             self.props: csv.CsvProperties = props
 
         def sourceApply(self, spark: SparkSession) -> DataFrame:
+
+            finalPath = self.props.path
+
+            if self.props.pathSelection == "sharepoint":
+                import os
+                from office365.sharepoint.client_context import ClientContext
+                from office365.runtime.auth.user_credential import UserCredential
+
+                sharepointUrl = self.props.secretUrl
+                ctx = ClientContext(sharepointUrl).with_credentials(
+                    UserCredential(self.props.secretUsername, self.props.secretPassword)
+                )
+                file_url = self.props.path
+                download_path = os.path.join("/tmp", os.path.basename(file_url))
+                with open(download_path, "wb") as local_file:
+                    ctx.web.get_file_by_server_relative_url(file_url).download(local_file).execute_query()
+
+                finalPath = f"file://{download_path}"
+                if self.props.optionalCopyDestination is not None and self.props.optionalCopyDestination != "":
+                    from pyspark.dbutils import DBUtils
+                    dbutils = DBUtils(spark)
+                    dbutils.fs.cp(f"file://{download_path}", self.props.optionalCopyDestination)
+                    finalPath = self.props.optionalCopyDestination
+            elif self.props.pathSelection == "sftp":
+                import paramiko
+                import os
+
+                def download_file_from_sftp(username, password, host, remote_file_path, local_file_path):
+                    ssh_client: SubstituteDisabled = paramiko.SSHClient()
+                    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    try:
+                        ssh_client.connect(host, username=username, password=password)
+                        sftp_client = ssh_client.open_sftp()
+                        try:
+                            sftp_client.get(remote_file_path, local_file_path)
+                        finally:
+                            sftp_client.close()
+                    finally:
+                        ssh_client.close()
+
+                download_path = os.path.join("/tmp", os.path.basename(self.props.sftpSourcePath))
+
+                download_file_from_sftp(username=self.props.sftpSecretUsername, password=self.props.sftpSecretPassword,
+                                        host=self.props.sftpSecretUrl, remote_file_path=self.props.sftpSourcePath,
+                                        local_file_path=download_path)
+                finalPath = f"file://{download_path}"
+                if self.props.sftpOptionalCopyDestination is not None and self.props.sftpOptionalCopyDestination != "":
+                    from pyspark.dbutils import DBUtils
+                    dbutils = DBUtils(spark)
+                    dbutils.fs.cp(f"file://{download_path}", self.props.sftpOptionalCopyDestination)
+                    print(
+                        "[Ok] file has been uploaded to DBFS path: {0}".format(self.props.sftpOptionalCopyDestination))
+                    finalPath = self.props.sftpOptionalCopyDestination
 
             reader = spark.read
             if self.props.schema is not None and self.props.useSchema:
@@ -369,7 +579,7 @@ class csv(DatasetSpec):
             if self.props.columnNameOfCorruptRecord is not None:
                 reader = reader.option("columnNameOfCorruptRecord", self.props.columnNameOfCorruptRecord)
 
-            return reader.csv(self.props.path)
+            return reader.csv(finalPath)
 
         def targetApply(self, spark: SparkSession, in0: DataFrame):
             writer = in0.write
@@ -419,3 +629,22 @@ class csv(DatasetSpec):
                     from prophecy.utils.gems_utils import concatenateFiles
                     concatenateFiles(spark, ".csv", self.props.writeMode, self.props.path + "_temp", self.props.path,
                                      True, True)
+
+    def __init__(self):
+        super().__init__()
+        self.registerPropertyEvolution(CSVPropertyMigration())
+
+
+class CSVPropertyMigration(PropertyMigrationObj):
+
+    def migrationNumber(self) -> int:
+        return 1
+
+    def up(self, old_properties: csv.CsvProperties) -> csv.CsvProperties:
+        return dataclasses.replace(
+            old_properties,
+            pathSelection="fileLocation"
+        )
+
+    def down(self, new_properties: csv.CsvProperties) -> csv.CsvProperties:
+        raise Exception("Downgrade is not implemented for this CSV version")
